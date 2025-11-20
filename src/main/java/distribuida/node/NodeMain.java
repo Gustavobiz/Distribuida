@@ -1,4 +1,9 @@
 package distribuida.node;
+import com.google.gson.Gson;
+import distribuida.common.CommandRequest;
+import distribuida.common.CommandResponse;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import java.io.*;
 import java.net.*;
@@ -20,7 +25,10 @@ public class NodeMain {
     private static String gatewayHost;
     private static int gatewayRegPort;    // 8000
     private static int localPort;         // porta do servidor do nó
+ private static final Gson gson = new Gson();
 
+    // Armazenamento key/value local do nó
+    private static final Map<String, String> store = new ConcurrentHashMap<>();
     public static void main(String[] args) throws Exception {
 
         System.out.println("ARGS RECEIVED:");
@@ -178,22 +186,67 @@ private static void startLocalTcpServer() {
 
     private static void handleClient(Socket client) {
         String remote = client.getRemoteSocketAddress().toString();
-        System.out.println("[node] connection from " + remote);
+        System.out.println("[node] conexão TCP de " + remote);
 
-        try (BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream()));
-             PrintWriter out = new PrintWriter(client.getOutputStream(), true)) {
+        try (BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream(), StandardCharsets.UTF_8));
+             PrintWriter out = new PrintWriter(new OutputStreamWriter(client.getOutputStream(), StandardCharsets.UTF_8), true)) {
 
             String line;
             while ((line = in.readLine()) != null) {
+                System.out.println("[node] recebido de " + remote + ": " + line);
 
-                System.out.println("[node] recv: " + line + " from " + remote);
+                CommandResponse resp;
+                try {
+                    CommandRequest req = gson.fromJson(line, CommandRequest.class);
 
-                // por enquanto só ecoa
-                out.println("[node/" + nodeId + "] echo: " + line);
+                    if (req == null || req.type == null) {
+                        resp = new CommandResponse("ERROR", null, "Requisição inválida");
+                    } else {
+                        String type = req.type.toUpperCase();
+
+                        switch (type) {
+                            case "WRITE":
+                            case "SET":
+                                if (req.key == null) {
+                                    resp = new CommandResponse("ERROR", null, "Chave ausente");
+                                } else {
+                                    store.put(req.key, req.value);
+                                    System.out.println("[node] gravado key=" + req.key + " value=" + req.value);
+                                    resp = new CommandResponse("OK", null, "Valor gravado");
+                                }
+                                break;
+
+                            case "READ":
+                            case "GET":
+                                if (req.key == null) {
+                                    resp = new CommandResponse("ERROR", null, "Chave ausente");
+                                } else {
+                                    String value = store.get(req.key);
+                                    if (value == null) {
+                                        resp = new CommandResponse("ERROR", null, "Chave não encontrada");
+                                    } else {
+                                        resp = new CommandResponse("OK", value, "Valor lido com sucesso");
+                                    }
+                                }
+                                break;
+
+                            default:
+                                resp = new CommandResponse("ERROR", null, "Tipo de operação desconhecido: " + req.type);
+                        }
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    resp = new CommandResponse("ERROR", null, "Falha ao processar JSON: " + e.getMessage());
+                }
+
+                String jsonResp = gson.toJson(resp);
+                out.println(jsonResp);
+                System.out.println("[node] resposta enviada para " + remote + ": " + jsonResp);
             }
 
         } catch (IOException e) {
-            System.err.println("[node] client error: " + e.getMessage());
+            System.err.println("[node] erro com cliente " + remote + ": " + e.getMessage());
         }
     }
+
 }

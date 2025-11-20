@@ -5,12 +5,19 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 
+import com.google.gson.Gson;
+import distribuida.common.CommandRequest;
+import distribuida.common.CommandResponse;
+import distribuida.gateway.ServiceRegistry.NodeInfo;
+
+
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.util.Properties;
 
 public class GatewayMain {
+    private static final Gson gson = new Gson();
 
     public static void main(String[] args) throws Exception {
         // 1) Carrega configurações
@@ -56,16 +63,17 @@ public class GatewayMain {
         // Endpoint de saúde / teste
         server.createContext("/health", new TextHandler("OK - Gateway HTTP"));
 
-        // Endpoint de teste de WRITE (depois vamos rotear para Leader)
-        server.createContext("/write", new EchoHandler("WRITE"));
+        // Escrita: envia comando para o Leader
+        server.createContext("/write", new WriteHandler());
 
-        // Endpoint de teste de READ (depois vamos rotear para réplicas)
-        server.createContext("/read", new EchoHandler("READ"));
+        // Leitura: envia comando para qualquer réplica ativa (por enquanto o próprio Leader)
+        server.createContext("/read", new ReadHandler());
 
-        server.setExecutor(null); // default executor
+        server.setExecutor(null); // executor padrão
         server.start();
-        System.out.println("[http]" + port);
+        System.out.println("[http] Servidor HTTP ouvindo na porta " + port);
     }
+
 
     // Handler simples para /health
     static class TextHandler implements HttpHandler {
@@ -84,6 +92,107 @@ public class GatewayMain {
             }
         }
     }
+
+        // ------------------ Handlers HTTP para WRITE/READ ------------------
+
+    static class WriteHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendPlainText(exchange, 405, "Use POST em /write");
+                return;
+            }
+
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            System.out.println("[http/write] corpo recebido: " + body);
+
+            CommandRequest req;
+            try {
+                req = gson.fromJson(body, CommandRequest.class);
+            } catch (Exception e) {
+                sendPlainText(exchange, 400, "JSON inválido: " + e.getMessage());
+                return;
+            }
+
+            if (req == null) req = new CommandRequest();
+            if (req.type == null) req.type = "WRITE";
+
+            // Buscar Leader ativo
+            ServiceRegistry registry = ServiceRegistry.getInstance();
+            java.util.Optional<NodeInfo> leaderOpt = registry.getActiveLeader();
+
+            if (leaderOpt.isEmpty()) {
+                sendPlainText(exchange, 503, "Nenhum LEADER ativo registrado no Gateway");
+                return;
+            }
+
+            NodeInfo leader = leaderOpt.get();
+            System.out.println("[http/write] encaminhando para LEADER " + leader.nodeId +
+                    " em " + leader.ip + ":" + leader.port);
+
+            CommandResponse resp;
+            try {
+                resp = sendTcpCommand(leader.ip, leader.port, req);
+            } catch (Exception e) {
+                e.printStackTrace();
+                sendPlainText(exchange, 500, "Falha ao comunicar com Leader: " + e.getMessage());
+                return;
+            }
+
+            String json = gson.toJson(resp);
+            sendJson(exchange, 200, json);
+        }
+    }
+
+    static class ReadHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendPlainText(exchange, 405, "Use POST em /read");
+                return;
+            }
+
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            System.out.println("[http/read] corpo recebido: " + body);
+
+            CommandRequest req;
+            try {
+                req = gson.fromJson(body, CommandRequest.class);
+            } catch (Exception e) {
+                sendPlainText(exchange, 400, "JSON inválido: " + e.getMessage());
+                return;
+            }
+
+            if (req == null) req = new CommandRequest();
+            if (req.type == null) req.type = "READ";
+
+            // Pega qualquer réplica ativa (por enquanto pode ser o próprio Leader)
+            ServiceRegistry registry = ServiceRegistry.getInstance();
+            java.util.Optional<NodeInfo> nodeOpt = registry.getAnyActiveReplica();
+
+            if (nodeOpt.isEmpty()) {
+                sendPlainText(exchange, 503, "Nenhum nó ativo registrado no Gateway");
+                return;
+            }
+
+            NodeInfo node = nodeOpt.get();
+            System.out.println("[http/read] encaminhando para nó " + node.nodeId +
+                    " em " + node.ip + ":" + node.port);
+
+            CommandResponse resp;
+            try {
+                resp = sendTcpCommand(node.ip, node.port, req);
+            } catch (Exception e) {
+                e.printStackTrace();
+                sendPlainText(exchange, 500, "Falha ao comunicar com nó: " + e.getMessage());
+                return;
+            }
+
+            String json = gson.toJson(resp);
+            sendJson(exchange, 200, json);
+        }
+    }
+
 
     // Por enquanto só ecoa a requisição, depois vai rotear para Leader/Followers
     static class EchoHandler implements HttpHandler {
@@ -182,6 +291,53 @@ public class GatewayMain {
         t.setDaemon(true);
         t.start();
     }
+    
+        // Envia um CommandRequest via TCP para um nó e lê um CommandResponse
+    private static CommandResponse sendTcpCommand(String host, int port, CommandRequest req) throws IOException {
+        String jsonReq = gson.toJson(req);
+        System.out.println("[gateway→node tcp] enviando para " + host + ":" + port + " => " + jsonReq);
+
+        try (Socket socket = new Socket(host, port);
+             BufferedWriter out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8));
+             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8))) {
+
+            out.write(jsonReq);
+            out.newLine();
+            out.flush();
+
+            String line = in.readLine();
+            System.out.println("[gateway←node tcp] recebido: " + line);
+
+            if (line == null) {
+                return new CommandResponse("ERROR", null, "Resposta vazia do nó");
+            }
+
+            try {
+                return gson.fromJson(line, CommandResponse.class);
+            } catch (Exception e) {
+                return new CommandResponse("ERROR", null, "Falha ao parsear resposta JSON: " + e.getMessage());
+            }
+        }
+    }
+
+    private static void sendPlainText(HttpExchange exchange, int status, String text) throws IOException {
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().add("Content-Type", "text/plain; charset=UTF-8");
+        exchange.sendResponseHeaders(status, bytes.length);
+        try (OutputStream os = exchange.getResponseBody()) {
+            os.write(bytes);
+        }
+    }
+
+    private static void sendJson(HttpExchange exchange, int status, String json) throws IOException {
+        byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().add("Content-Type", "application/json; charset=UTF-8");
+        exchange.sendResponseHeaders(status, bytes.length);
+        try (OutputStream os = exchange.getResponseBody()) {
+            os.write(bytes);
+        }
+    }
+
 
     // ------------------ Registro / Heartbeat UDP 8000 ------------------
 
