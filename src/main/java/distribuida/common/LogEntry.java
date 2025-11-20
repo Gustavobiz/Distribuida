@@ -1,4 +1,4 @@
-package main.java.distribuida.common;
+package distribuida.common;
 
 public class LogEntry {
     public int index;

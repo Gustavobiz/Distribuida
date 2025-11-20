@@ -1,10 +1,12 @@
-distribuida/gateway/ServiceRegistry$NodeInfo.class
-distribuida/gateway/ServiceRegistry.class
 distribuida/gateway/GatewayMain$WriteHandler.class
 distribuida/gateway/GatewayMain$EchoHandler.class
-distribuida/gateway/GatewayMain$ReadHandler.class
 distribuida/gateway/GatewayMain$TextHandler.class
-distribuida/node/NodeMain.class
 distribuida/common/CommandRequest.class
+distribuida/gateway/ServiceRegistry$NodeInfo.class
+distribuida/gateway/ServiceRegistry.class
+distribuida/common/NodeRole.class
+distribuida/common/LogEntry.class
+distribuida/gateway/GatewayMain$ReadHandler.class
+distribuida/node/NodeMain.class
 distribuida/common/CommandResponse.class
 distribuida/gateway/GatewayMain.class
