@@ -1,0 +1,6 @@
+distribuida/gateway/ServiceRegistry$NodeInfo.class
+distribuida/gateway/ServiceRegistry.class
+distribuida/gateway/GatewayMain$EchoHandler.class
+distribuida/gateway/GatewayMain$TextHandler.class
+distribuida/node/NodeMain.class
+distribuida/gateway/GatewayMain.class
