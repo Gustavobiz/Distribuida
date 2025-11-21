@@ -1,12 +1,16 @@
 distribuida/gateway/GatewayMain$WriteHandler.class
+distribuida/common/RequestVoteRequest.class
 distribuida/gateway/GatewayMain$EchoHandler.class
 distribuida/gateway/GatewayMain$TextHandler.class
+distribuida/node/NodeMain$PeerInfoResponse.class
 distribuida/common/CommandRequest.class
+distribuida/common/RequestVoteResponse.class
 distribuida/gateway/ServiceRegistry$NodeInfo.class
 distribuida/gateway/ServiceRegistry.class
 distribuida/common/NodeRole.class
 distribuida/common/LogEntry.class
 distribuida/gateway/GatewayMain$ReadHandler.class
+distribuida/common/PeerInfo.class
 distribuida/node/NodeMain.class
 distribuida/common/CommandResponse.class
 distribuida/gateway/GatewayMain.class

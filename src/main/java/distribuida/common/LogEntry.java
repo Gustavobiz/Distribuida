@@ -17,11 +17,7 @@ public class LogEntry {
 
     @Override
     public String toString() {
-        return "LogEntry{" +
-                "index=" + index +
-                ", term=" + term +
-                ", key='" + key + '\'' +
-                ", value='" + value + '\'' +
-                '}';
+        return "LogEntry{index=" + index + ", term=" + term +
+                ", key='" + key + "', value='" + value + "'}";
     }
 }

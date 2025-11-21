@@ -116,7 +116,7 @@ public class ServiceRegistry {
     }
 
     // Pegar Followers ativos (para READ / replicação)
-    public java.util.List<NodeInfo> getActiveFollowers() {
+    public List<NodeInfo> getActiveFollowers() {
         return registry.values().stream()
                 .filter(info -> "FOLLOWER".equalsIgnoreCase(info.role) && info.isActive)
                 .collect(Collectors.toList());
@@ -131,5 +131,41 @@ public class ServiceRegistry {
 
     public Collection<NodeInfo> listAllNodes() {
         return Collections.unmodifiableCollection(registry.values());
+    }
+
+    // ------------------------------------------------------
+    // RETORNAR TODOS OS NÓS ATIVOS
+    // ------------------------------------------------------
+    public List<NodeInfo> getActiveNodes() {
+        return registry.values()
+                .stream()
+                .filter(n -> n.isActive)
+                .toList();
+    }
+
+    // ------------------------------------------------------
+    // CONTAR NÓS ATIVOS
+    // ------------------------------------------------------
+    public int countActiveNodes() {
+        return (int) registry.values()
+                .stream()
+                .filter(n -> n.isActive)
+                .count();
+    }
+
+    // ------------------------------------------------------
+    // RETORNAR LISTA DE PEERS (para enviar ao Node)
+    // ------------------------------------------------------
+    public String toPeersJson() {
+        var list = registry.values()
+                .stream()
+                .filter(n -> n.isActive)
+                .map(n -> String.format(
+                        "{\"nodeId\":\"%s\",\"ip\":\"%s\",\"port\":%d}",
+                        n.nodeId, n.ip, n.port
+                ))
+                .collect(Collectors.joining(","));
+
+        return "[" + list + "]";
     }
 }

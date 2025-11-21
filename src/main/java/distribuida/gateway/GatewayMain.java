@@ -10,7 +10,6 @@ import distribuida.common.CommandRequest;
 import distribuida.common.CommandResponse;
 import distribuida.gateway.ServiceRegistry.NodeInfo;
 
-
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -74,7 +73,6 @@ public class GatewayMain {
         System.out.println("[http] Servidor HTTP ouvindo na porta " + port);
     }
 
-
     // Handler simples para /health
     static class TextHandler implements HttpHandler {
         private final String responseText;
@@ -93,7 +91,7 @@ public class GatewayMain {
         }
     }
 
-        // ------------------ Handlers HTTP para WRITE/READ ------------------
+    // ------------------ Handlers HTTP para WRITE/READ ------------------
 
     static class WriteHandler implements HttpHandler {
         @Override
@@ -193,8 +191,7 @@ public class GatewayMain {
         }
     }
 
-
-    // Por enquanto só ecoa a requisição, depois vai rotear para Leader/Followers
+    // Handler de echo (não está ligado em nenhum endpoint ainda, mas pode usar se quiser)
     static class EchoHandler implements HttpHandler {
         private final String type;
 
@@ -291,8 +288,8 @@ public class GatewayMain {
         t.setDaemon(true);
         t.start();
     }
-    
-        // Envia um CommandRequest via TCP para um nó e lê um CommandResponse
+
+    // Envia um CommandRequest via TCP para um nó e lê um CommandResponse
     private static CommandResponse sendTcpCommand(String host, int port, CommandRequest req) throws IOException {
         String jsonReq = gson.toJson(req);
         System.out.println("[gateway→node tcp] enviando para " + host + ":" + port + " => " + jsonReq);
@@ -338,7 +335,6 @@ public class GatewayMain {
         }
     }
 
-
     // ------------------ Registro / Heartbeat UDP 8000 ------------------
 
     private static void startRegistrationServer(int port) {
@@ -355,6 +351,9 @@ public class GatewayMain {
                     String remote = packet.getAddress().getHostAddress() + ":" + packet.getPort();
                     System.out.println("[reg] recv from " + remote + ": " + msg);
 
+                    // Resposta padrão
+                    String response = "OK";
+
                     // Formatos aceitos (simples por enquanto):
                     // REGISTER nodeId ip port role
                     // HEARTBEAT nodeId
@@ -367,6 +366,10 @@ public class GatewayMain {
                             int nodePort = Integer.parseInt(parts[3]);
                             String role = parts[4];
                             registry.registerNode(nodeId, ip, nodePort, role);
+
+                            String peersJson = registry.toPeersJson();
+                            response = "{\"peers\":" + peersJson + "}";
+
                         } else if ("HEARTBEAT".equals(cmd)) {
                             String nodeId = parts[1];
                             registry.updateHeartbeat(nodeId);
@@ -375,8 +378,6 @@ public class GatewayMain {
                         }
                     }
 
-                    // opcional: responder algo
-                    String response = "OK";
                     byte[] respBytes = response.getBytes(StandardCharsets.UTF_8);
                     DatagramPacket resp = new DatagramPacket(
                             respBytes, respBytes.length, packet.getAddress(), packet.getPort());
