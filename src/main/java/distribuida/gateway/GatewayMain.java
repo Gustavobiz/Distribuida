@@ -1,32 +1,39 @@
 package distribuida.gateway;
 
-import com.sun.net.httpserver.Headers;
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpHandler;
-import com.sun.net.httpserver.HttpServer;
-
+import com.sun.net.httpserver.*;
 import com.google.gson.Gson;
-import distribuida.common.CommandRequest;
-import distribuida.common.CommandResponse;
+
+import distribuida.common.*;
 import distribuida.gateway.ServiceRegistry.NodeInfo;
 
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
-import java.util.Properties;
+import java.util.*;
 
+/**
+ * GatewayMain
+ * -----------
+ * Este gateway recebe todas as comunicações:
+ *
+ * - HTTP do cliente (/write, /read)
+ * - HTTP dos Nodes (RPCs RAFT)
+ * - UDP dos Nodes (REGISTER/HEARTBEAT)
+ * - TCP para enviar comandos para os Nodes
+ *
+ * Toda comunicação Node → Node deve ser roteada aqui.
+ */
 public class GatewayMain {
+
     private static final Gson gson = new Gson();
 
     public static void main(String[] args) throws Exception {
-        // 1) Carrega configurações
+
+        // Lê arquivo de configuração (porta padrão)
         Properties props = new Properties();
         try (InputStream in = GatewayMain.class.getClassLoader()
                 .getResourceAsStream("gateway-config.properties")) {
-            if (in == null) {
-                throw new IllegalStateException("gateway-config.properties não encontrado em resources");
-            }
-            props.load(in);
+            if (in != null) props.load(in);
         }
 
         String host = props.getProperty("gateway.host", "localhost");
@@ -41,10 +48,9 @@ public class GatewayMain {
                 " udp=" + udpPort +
                 " registration=" + registrationPort);
 
-        // 2) Inicia cada servidor em uma thread separada
+        // Inicia servidores
         startHttpServer(host, httpPort);
         startTcpServer(tcpPort);
-        startUdpServer(udpPort);
         startRegistrationServer(registrationPort);
 
         System.out.println("Gateway ON: http=" + httpPort +
@@ -53,27 +59,33 @@ public class GatewayMain {
                 " reg=" + registrationPort);
     }
 
-    // ------------------ HTTP 8080 ------------------
+
+
+    // ============================================================
+    // 1) HTTP SERVER - para /write, /read, /raft/requestVote e /raft/appendEntries
+    // ============================================================
 
     private static void startHttpServer(String host, int port) throws IOException {
         InetSocketAddress addr = new InetSocketAddress(host, port);
         HttpServer server = HttpServer.create(addr, 0);
 
-        // Endpoint de saúde / teste
+        // Saude
         server.createContext("/health", new TextHandler("OK - Gateway HTTP"));
 
-        // Escrita: envia comando para o Leader
+        // Operações normais de key/value
         server.createContext("/write", new WriteHandler());
-
-        // Leitura: envia comando para qualquer réplica ativa (por enquanto o próprio Leader)
         server.createContext("/read", new ReadHandler());
 
-        server.setExecutor(null); // executor padrão
+        // RPCs RAFT via HTTP
+        server.createContext("/raft/requestVote", new RequestVoteHandler());
+        server.createContext("/raft/appendEntries", new AppendEntriesHandler());
+
+        server.setExecutor(null);
         server.start();
         System.out.println("[http] Servidor HTTP ouvindo na porta " + port);
     }
 
-    // Handler simples para /health
+    // Handler simples de saúde
     static class TextHandler implements HttpHandler {
         private final String responseText;
 
@@ -85,310 +97,327 @@ public class GatewayMain {
         public void handle(HttpExchange exchange) throws IOException {
             byte[] bytes = responseText.getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(200, bytes.length);
-            try (OutputStream os = exchange.getResponseBody()) {
-                os.write(bytes);
-            }
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
         }
     }
 
-    // ------------------ Handlers HTTP para WRITE/READ ------------------
 
+    // ---------------------- /write ---------------------------
     static class WriteHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+
             if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
-                sendPlainText(exchange, 405, "Use POST em /write");
+                sendPlain(exchange, 405, "Use POST");
                 return;
             }
 
             String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-            System.out.println("[http/write] corpo recebido: " + body);
+            System.out.println("[http/write] " + body);
 
-            CommandRequest req;
-            try {
-                req = gson.fromJson(body, CommandRequest.class);
-            } catch (Exception e) {
-                sendPlainText(exchange, 400, "JSON inválido: " + e.getMessage());
-                return;
-            }
+            CommandRequest req = gson.fromJson(body, CommandRequest.class);
 
-            if (req == null) req = new CommandRequest();
-            if (req.type == null) req.type = "WRITE";
-
-            // Buscar Leader ativo
-            ServiceRegistry registry = ServiceRegistry.getInstance();
-            java.util.Optional<NodeInfo> leaderOpt = registry.getActiveLeader();
+            // Busca líder ativo
+            var reg = ServiceRegistry.getInstance();
+            var leaderOpt = reg.getActiveLeader();
 
             if (leaderOpt.isEmpty()) {
-                sendPlainText(exchange, 503, "Nenhum LEADER ativo registrado no Gateway");
+                sendPlain(exchange, 503, "Nenhum líder ativo");
                 return;
             }
 
             NodeInfo leader = leaderOpt.get();
-            System.out.println("[http/write] encaminhando para LEADER " + leader.nodeId +
-                    " em " + leader.ip + ":" + leader.port);
 
-            CommandResponse resp;
-            try {
-                resp = sendTcpCommand(leader.ip, leader.port, req);
-            } catch (Exception e) {
-                e.printStackTrace();
-                sendPlainText(exchange, 500, "Falha ao comunicar com Leader: " + e.getMessage());
-                return;
-            }
-
-            String json = gson.toJson(resp);
-            sendJson(exchange, 200, json);
+            CommandResponse resp = sendTcpCommand(leader.ip, leader.port, req);
+            sendJson(exchange, 200, gson.toJson(resp));
         }
     }
 
+    // ---------------------- /read ---------------------------
     static class ReadHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+
             if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
-                sendPlainText(exchange, 405, "Use POST em /read");
+                sendPlain(exchange, 405, "Use POST");
                 return;
             }
 
             String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-            System.out.println("[http/read] corpo recebido: " + body);
+            System.out.println("[http/read] " + body);
 
-            CommandRequest req;
-            try {
-                req = gson.fromJson(body, CommandRequest.class);
-            } catch (Exception e) {
-                sendPlainText(exchange, 400, "JSON inválido: " + e.getMessage());
-                return;
-            }
+            CommandRequest req = gson.fromJson(body, CommandRequest.class);
 
-            if (req == null) req = new CommandRequest();
-            if (req.type == null) req.type = "READ";
-
-            // Pega qualquer réplica ativa (por enquanto pode ser o próprio Leader)
-            ServiceRegistry registry = ServiceRegistry.getInstance();
-            java.util.Optional<NodeInfo> nodeOpt = registry.getAnyActiveReplica();
+            // Pega qualquer nó ativo
+            var reg = ServiceRegistry.getInstance();
+            var nodeOpt = reg.getAnyActiveReplica();
 
             if (nodeOpt.isEmpty()) {
-                sendPlainText(exchange, 503, "Nenhum nó ativo registrado no Gateway");
+                sendPlain(exchange, 503, "Nenhum nó ativo");
                 return;
             }
 
             NodeInfo node = nodeOpt.get();
-            System.out.println("[http/read] encaminhando para nó " + node.nodeId +
-                    " em " + node.ip + ":" + node.port);
+            CommandResponse resp = sendTcpCommand(node.ip, node.port, req);
 
-            CommandResponse resp;
-            try {
-                resp = sendTcpCommand(node.ip, node.port, req);
-            } catch (Exception e) {
-                e.printStackTrace();
-                sendPlainText(exchange, 500, "Falha ao comunicar com nó: " + e.getMessage());
-                return;
-            }
-
-            String json = gson.toJson(resp);
-            sendJson(exchange, 200, json);
+            sendJson(exchange, 200, gson.toJson(resp));
         }
     }
 
-    // Handler de echo (não está ligado em nenhum endpoint ainda, mas pode usar se quiser)
-    static class EchoHandler implements HttpHandler {
-        private final String type;
 
-        EchoHandler(String type) {
-            this.type = type;
-        }
+
+    // ============================================================
+    // 2) /raft/requestVote - RPC de eleição RAFT via HTTP
+    // ============================================================
+
+    static class RequestVoteHandler implements HttpHandler {
 
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+
             String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-            String method = exchange.getRequestMethod();
-            String response = "[http/" + type + "] method=" + method + " body=" + body;
+            System.out.println("[raft/requestVote] recebido: " + body);
 
-            System.out.println(response);
+            RequestVoteRequest req = gson.fromJson(body, RequestVoteRequest.class);
 
-            Headers headers = exchange.getResponseHeaders();
-            headers.add("Content-Type", "text/plain; charset=UTF-8");
-            byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, bytes.length);
-            try (OutputStream os = exchange.getResponseBody()) {
-                os.write(bytes);
+            // Identifica o nó alvo
+            var reg = ServiceRegistry.getInstance();
+            var target = reg.getActiveNodes().stream()
+                    .filter(n -> n.nodeId.equals(req.targetNodeId))
+                    .findFirst();
+
+            if (target.isEmpty()) {
+                sendPlain(exchange, 404, "Nó alvo não encontrado");
+                return;
             }
+
+            NodeInfo dest = target.get();
+
+            // envia via TCP para o nó
+            RequestVoteResponse tcpResp = sendTcpRequestVote(dest.ip, dest.port, req);
+
+            sendJson(exchange, 200, gson.toJson(tcpResp));
         }
     }
 
-    // ------------------ TCP 8081 ------------------
+
+    // ============================================================
+    // 3) /raft/appendEntries - replicação de log via HTTP
+    // ============================================================
+
+    static class AppendEntriesHandler implements HttpHandler {
+
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            System.out.println("[raft/appendEntries] recebido: " + body);
+
+            AppendEntriesRequest req = gson.fromJson(body, AppendEntriesRequest.class);
+
+            var reg = ServiceRegistry.getInstance();
+            var target = reg.getActiveNodes().stream()
+                    .filter(n -> n.nodeId.equals(req.targetNodeId))
+                    .findFirst();
+
+            if (target.isEmpty()) {
+                sendPlain(exchange, 404, "Nó alvo não encontrado");
+                return;
+            }
+
+            NodeInfo dest = target.get();
+
+            AppendEntriesResponse tcpResp = sendTcpAppendEntries(dest.ip, dest.port, req);
+
+            sendJson(exchange, 200, gson.toJson(tcpResp));
+        }
+    }
+
+
+    // ============================================================
+    // 4) TCP server interno — opcional / echo / RAFT futuro
+    // ============================================================
 
     private static void startTcpServer(int port) {
         Thread t = new Thread(() -> {
-            try (ServerSocket serverSocket = new ServerSocket(port)) {
-                System.out.println("[tcp]" + port);
+            try (ServerSocket server = new ServerSocket(port)) {
+                System.out.println("[tcp] Servidor interno na porta " + port);
                 while (true) {
-                    Socket client = serverSocket.accept();
+                    Socket client = server.accept();
                     new Thread(() -> handleTcpClient(client)).start();
                 }
-            } catch (IOException e) {
-                System.err.println("[tcp] ERROR: " + e.getMessage());
+            } catch (Exception e) {
                 e.printStackTrace();
             }
         });
+
         t.setDaemon(true);
         t.start();
     }
 
-    private static void handleTcpClient(Socket client) {
-        String remote = client.getRemoteSocketAddress().toString();
-        System.out.println("[tcp] connection from " + remote);
-        try (BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream(), StandardCharsets.UTF_8));
-             BufferedWriter out = new BufferedWriter(new OutputStreamWriter(client.getOutputStream(), StandardCharsets.UTF_8))) {
+    private static void handleTcpClient(Socket c) {
+        try (BufferedReader in = new BufferedReader(new InputStreamReader(c.getInputStream()));
+             BufferedWriter out = new BufferedWriter(new OutputStreamWriter(c.getOutputStream()))) {
 
-            String line;
-            while ((line = in.readLine()) != null) {
-                System.out.println("[tcp] recv: " + line + " from " + remote);
-                // Por enquanto só ecoa. Depois: rotear WRITE/READ para Leader/Follower.
-                out.write("[tcp/echo] " + line);
-                out.newLine();
-                out.flush();
-            }
-        } catch (IOException e) {
-            System.err.println("[tcp] client error: " + e.getMessage());
-        } finally {
-            try {
-                client.close();
-            } catch (IOException ignore) {}
-        }
-    }
+            String line = in.readLine();
+            System.out.println("[tcp/internal] recv: " + line);
 
-    // ------------------ UDP 8082 ------------------
-
-    private static void startUdpServer(int port) {
-        Thread t = new Thread(() -> {
-            try (DatagramSocket socket = new DatagramSocket(port)) {
-                System.out.println("[udp] " + port);
-                byte[] buf = new byte[2048];
-                while (true) {
-                    DatagramPacket packet = new DatagramPacket(buf, buf.length);
-                    socket.receive(packet);
-                    String msg = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
-                    String remote = packet.getAddress().getHostAddress() + ":" + packet.getPort();
-                    System.out.println("[udp] recv from " + remote + ": " + msg);
-
-                    // Por enquanto só ecoa
-                    String response = "[udp/echo] " + msg;
-                    byte[] respBytes = response.getBytes(StandardCharsets.UTF_8);
-                    DatagramPacket resp = new DatagramPacket(
-                            respBytes, respBytes.length, packet.getAddress(), packet.getPort());
-                    socket.send(resp);
-                }
-            } catch (IOException e) {
-                System.err.println("[udp] ERROR: " + e.getMessage());
-                e.printStackTrace();
-            }
-        });
-        t.setDaemon(true);
-        t.start();
-    }
-
-    // Envia um CommandRequest via TCP para um nó e lê um CommandResponse
-    private static CommandResponse sendTcpCommand(String host, int port, CommandRequest req) throws IOException {
-        String jsonReq = gson.toJson(req);
-        System.out.println("[gateway→node tcp] enviando para " + host + ":" + port + " => " + jsonReq);
-
-        try (Socket socket = new Socket(host, port);
-             BufferedWriter out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8));
-             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8))) {
-
-            out.write(jsonReq);
+            out.write("[echo]" + line);
             out.newLine();
             out.flush();
 
-            String line = in.readLine();
-            System.out.println("[gateway←node tcp] recebido: " + line);
-
-            if (line == null) {
-                return new CommandResponse("ERROR", null, "Resposta vazia do nó");
-            }
-
-            try {
-                return gson.fromJson(line, CommandResponse.class);
-            } catch (Exception e) {
-                return new CommandResponse("ERROR", null, "Falha ao parsear resposta JSON: " + e.getMessage());
-            }
-        }
+        } catch (Exception ignore) {}
     }
 
-    private static void sendPlainText(HttpExchange exchange, int status, String text) throws IOException {
-        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().add("Content-Type", "text/plain; charset=UTF-8");
-        exchange.sendResponseHeaders(status, bytes.length);
-        try (OutputStream os = exchange.getResponseBody()) {
-            os.write(bytes);
-        }
-    }
 
-    private static void sendJson(HttpExchange exchange, int status, String json) throws IOException {
-        byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().add("Content-Type", "application/json; charset=UTF-8");
-        exchange.sendResponseHeaders(status, bytes.length);
-        try (OutputStream os = exchange.getResponseBody()) {
-            os.write(bytes);
-        }
-    }
 
-    // ------------------ Registro / Heartbeat UDP 8000 ------------------
+    // ============================================================
+    // 5) UDP 8000 — REGISTER e HEARTBEAT
+    // ============================================================
 
     private static void startRegistrationServer(int port) {
         Thread t = new Thread(() -> {
+
             try (DatagramSocket socket = new DatagramSocket(port)) {
-                System.out.println("[reg] Listening for register/heartbeat on " + port);
+
+                System.out.println("[reg] ouvindo em UDP " + port);
+
                 byte[] buf = new byte[2048];
-                ServiceRegistry registry = ServiceRegistry.getInstance();
+                ServiceRegistry reg = ServiceRegistry.getInstance();
 
                 while (true) {
                     DatagramPacket packet = new DatagramPacket(buf, buf.length);
                     socket.receive(packet);
+
                     String msg = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
-                    String remote = packet.getAddress().getHostAddress() + ":" + packet.getPort();
-                    System.out.println("[reg] recv from " + remote + ": " + msg);
+                    System.out.println("[reg] recebido: " + msg);
 
-                    // Resposta padrão
-                    String response = "OK";
+                    String[] p = msg.split("\\s+");
 
-                    // Formatos aceitos (simples por enquanto):
-                    // REGISTER nodeId ip port role
-                    // HEARTBEAT nodeId
-                    String[] parts = msg.trim().split("\\s+");
-                    if (parts.length >= 2) {
-                        String cmd = parts[0].toUpperCase();
-                        if ("REGISTER".equals(cmd) && parts.length >= 5) {
-                            String nodeId = parts[1];
-                            String ip = parts[2];
-                            int nodePort = Integer.parseInt(parts[3]);
-                            String role = parts[4];
-                            registry.registerNode(nodeId, ip, nodePort, role);
+                    if (p[0].equalsIgnoreCase("REGISTER")) {
+                        String nodeId = p[1];
+                        String ip     = p[2];
+                        int nport     = Integer.parseInt(p[3]);
+                        String role   = p[4];
 
-                            String peersJson = registry.toPeersJson();
-                            response = "{\"peers\":" + peersJson + "}";
+                        reg.registerNode(nodeId, ip, nport, role);
 
-                        } else if ("HEARTBEAT".equals(cmd)) {
-                            String nodeId = parts[1];
-                            registry.updateHeartbeat(nodeId);
-                        } else {
-                            System.out.println("[reg] comando inválido: " + msg);
-                        }
+                        // envia peers atualizados
+                        String peersJson = reg.buildPeersJson();
+                        byte[] respBytes = peersJson.getBytes(StandardCharsets.UTF_8);
+                        socket.send(new DatagramPacket(
+                                respBytes, respBytes.length,
+                                packet.getAddress(), packet.getPort()
+                        ));
+
+                    } else if (p[0].equalsIgnoreCase("HEARTBEAT")) {
+
+                        reg.updateHeartbeat(p[1]);
+
+                        // resposta simples
+                        String resp = "OK";
+                        byte[] r = resp.getBytes(StandardCharsets.UTF_8);
+                        socket.send(new DatagramPacket(
+                                r, r.length,
+                                packet.getAddress(), packet.getPort()
+                        ));
                     }
-
-                    byte[] respBytes = response.getBytes(StandardCharsets.UTF_8);
-                    DatagramPacket resp = new DatagramPacket(
-                            respBytes, respBytes.length, packet.getAddress(), packet.getPort());
-                    socket.send(resp);
                 }
-            } catch (IOException e) {
-                System.err.println("[reg] ERROR: " + e.getMessage());
+
+            } catch (Exception e) {
                 e.printStackTrace();
             }
+
         });
+
         t.setDaemon(true);
         t.start();
+    }
+
+
+
+    // ============================================================
+    // FUNÇÕES DE ENVIO TCP PARA OS NODES
+    // ============================================================
+
+    private static CommandResponse sendTcpCommand(String ip, int port, CommandRequest req) {
+
+        String json = gson.toJson(req);
+
+        try (Socket socket = new Socket(ip, port);
+             BufferedWriter out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
+             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
+
+            out.write(json);
+            out.newLine();
+            out.flush();
+
+            String resp = in.readLine();
+            return gson.fromJson(resp, CommandResponse.class);
+
+        } catch (Exception e) {
+            return new CommandResponse("ERROR", null, e.getMessage());
+        }
+    }
+
+    private static RequestVoteResponse sendTcpRequestVote(String ip, int port, RequestVoteRequest req) {
+
+        String json = gson.toJson(req);
+
+        try (Socket socket = new Socket(ip, port);
+             BufferedWriter out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
+             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
+
+            out.write(json);
+            out.newLine();
+            out.flush();
+
+            String resp = in.readLine();
+            return gson.fromJson(resp, RequestVoteResponse.class);
+
+        } catch (Exception e) {
+            return new RequestVoteResponse(req.term, false);
+        }
+    }
+
+    private static AppendEntriesResponse sendTcpAppendEntries(String ip, int port, AppendEntriesRequest req) {
+
+        String json = gson.toJson(req);
+
+        try (Socket socket = new Socket(ip, port);
+             BufferedWriter out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
+             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
+
+            out.write(json);
+            out.newLine();
+            out.flush();
+
+            String resp = in.readLine();
+            return gson.fromJson(resp, AppendEntriesResponse.class);
+
+        } catch (Exception e) {
+            return new AppendEntriesResponse(req.term, false);
+        }
+    }
+
+
+    // ============================================================
+    // AUXILIARES HTTP
+    // ============================================================
+
+    private static void sendPlain(HttpExchange ex, int code, String msg) throws IOException {
+        byte[] b = msg.getBytes(StandardCharsets.UTF_8);
+        ex.sendResponseHeaders(code, b.length);
+        ex.getResponseBody().write(b);
+        ex.close();
+    }
+
+    private static void sendJson(HttpExchange ex, int code, String json) throws IOException {
+        byte[] b = json.getBytes(StandardCharsets.UTF_8);
+        ex.getResponseHeaders().set("Content-Type", "application/json");
+        ex.sendResponseHeaders(code, b.length);
+        ex.getResponseBody().write(b);
+        ex.close();
     }
 }

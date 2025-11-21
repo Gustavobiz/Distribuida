@@ -4,7 +4,9 @@
 /home/gustavo/Documentos/Distribuida/src/main/java/distribuida/common/NodeRole.java
 /home/gustavo/Documentos/Distribuida/src/main/java/distribuida/common/CommandResponse.java
 /home/gustavo/Documentos/Distribuida/src/main/java/distribuida/common/LogEntry.java
+/home/gustavo/Documentos/Distribuida/src/main/java/distribuida/common/AppendEntriesRequest.java
 /home/gustavo/Documentos/Distribuida/src/main/java/distribuida/common/CommandRequest.java
+/home/gustavo/Documentos/Distribuida/src/main/java/distribuida/common/AppendEntriesResponse.java
 /home/gustavo/Documentos/Distribuida/src/main/java/distribuida/gateway/ServiceRegistry.java
 /home/gustavo/Documentos/Distribuida/src/main/java/distribuida/common/RequestVoteRequest.java
 /home/gustavo/Documentos/Distribuida/src/main/java/distribuida/gateway/GatewayMain.java

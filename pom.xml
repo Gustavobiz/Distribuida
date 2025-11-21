@@ -10,14 +10,36 @@
     <version>1.0-SNAPSHOT</version>
 <build>
     <plugins>
-<plugin>
-    <groupId>org.codehaus.mojo</groupId>
-    <artifactId>exec-maven-plugin</artifactId>
-    <version>3.0.0</version>
-</plugin>
+
+        <!-- empacotar dependências dentro do JAR -->
+        <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-assembly-plugin</artifactId>
+            <version>3.3.0</version>
+            <configuration>
+                <descriptorRefs>
+                    <descriptorRefs>jar-with-dependencies</descriptorRefs>
+                </descriptorRefs>
+                <archive>
+                    <manifest>
+                        <mainClass>distribuida.node.NodeMain</mainClass>
+                    </manifest>
+                </archive>
+            </configuration>
+            <executions>
+                <execution>
+                    <id>make-assembly</id>
+                    <phase>package</phase>
+                    <goals>
+                        <goal>single</goal>
+                    </goals>
+                </execution>
+            </executions>
+        </plugin>
 
     </plugins>
 </build>
+
 
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
